@@ -1,12 +1,8 @@
-﻿using System;
+
+using System;
 using System.Collections.Generic;
-using System.ComponentModel;
-using System.Data;
-using System.Drawing;
 using System.IO;
-using System.Linq;
 using System.Text;
-using System.Threading.Tasks;
 using System.Windows.Forms;
 using static WFormMagazzino.Form1;
 
@@ -20,7 +16,7 @@ namespace WFormMagazzino
         const string FILE_INDICI = "INDICI.txt";
 
         const int DIM_NOME = 15;
-        const int DIM_RECORD = 4 + DIM_NOME + 16 + 4 + 1;
+        const int DIM_RECORD = 4 + DIM_NOME * 2 + 16 + 4 + 1;
 
         static int ID_COUNTER;
 
@@ -28,7 +24,6 @@ namespace WFormMagazzino
         {
             InitializeComponent();
             GeneraFile();
-
             AggiornaDGV();
         }
 
@@ -43,7 +38,8 @@ namespace WFormMagazzino
             {
             }
 
-            
+            indici.Clear();
+
             foreach (string riga in File.ReadAllLines(FILE_INDICI))
             {
                 if (string.IsNullOrWhiteSpace(riga))
@@ -51,11 +47,17 @@ namespace WFormMagazzino
 
                 string[] dati = riga.Split(';');
 
-                int codice = int.Parse(dati[0]);
-                int posizione = int.Parse(dati[1]);
+                if (dati.Length != 2)
+                    continue;
+
+                if (!int.TryParse(dati[0], out int codice) ||
+                    !int.TryParse(dati[1], out int posizione))
+                    continue;
+
+                if (posizione < 0 || posizione % DIM_RECORD != 0)
+                    continue;
 
                 Indice i = new Indice(codice, posizione);
-
                 indici.Add(i);
             }
 
@@ -63,13 +65,23 @@ namespace WFormMagazzino
             indici.Sort((a, b) => a.Codice.CompareTo(b.Codice));
 
             // ASSEGNA IL CODICE PIÙ ALTO A ID_COUNTER
-            if (indici.Count > 0)
+            ID_COUNTER = 0;
+
+            foreach (Indice indice in indici)
             {
-                ID_COUNTER = indici[indici.Count - 1].Codice;
+                if (indice.Codice > ID_COUNTER)
+                    ID_COUNTER = indice.Codice;
             }
-            else
+        }
+
+        public void SalvaIndici()
+        {
+            using (StreamWriter sw = new StreamWriter(FILE_INDICI, false))
             {
-                ID_COUNTER = 0;
+                foreach (Indice indice in indici)
+                {
+                    sw.WriteLine($"{indice.Codice};{indice.Posizione}");
+                }
             }
         }
 
@@ -95,12 +107,32 @@ namespace WFormMagazzino
 
         public Prodotto LeggiProdotto(int posizione)
         {
-            using(FileStream fs = new FileStream(FILE_ARCHIVIO, FileMode.Open))
+            using (FileStream fs = new FileStream(FILE_ARCHIVIO, FileMode.Open, FileAccess.Read))
             {
-                using (BinaryReader bw = new BinaryReader(fs))
+                if (posizione < 0 ||
+                    posizione + DIM_RECORD > fs.Length)
+                    throw new InvalidDataException("POSIZIONE NON VALIDA.");
+
+                fs.Seek(posizione, SeekOrigin.Begin);
+
+                using (BinaryReader br = new BinaryReader(fs))
                 {
-                    fs.Seek(posizione, SeekOrigin.Begin);
-                    return new Prodotto(bw.ReadInt32(), new string(bw.ReadChars(DIM_NOME)).TrimEnd(), bw.ReadDecimal(), bw.ReadInt32(), bw.ReadBoolean());
+                    int codice = br.ReadInt32();
+
+                    byte[] nomeBytes = br.ReadBytes(DIM_NOME * 2);
+
+                    if (nomeBytes.Length != DIM_NOME * 2)
+                        throw new EndOfStreamException();
+
+                    string nome = Encoding.Unicode
+                        .GetString(nomeBytes)
+                        .TrimEnd('\0');
+
+                    decimal prezzo = br.ReadDecimal();
+                    int quantita = br.ReadInt32();
+                    bool isActive = br.ReadBoolean();
+
+                    return new Prodotto(codice, nome, prezzo, quantita, isActive);
                 }
             }
         }
@@ -108,13 +140,20 @@ namespace WFormMagazzino
         public void ScriviProdotto(FileStream fs, Prodotto p, int posizione)
         {
             fs.Seek(posizione, SeekOrigin.Begin);
-            using (BinaryWriter bw = new BinaryWriter(fs))
+
+            using (BinaryWriter bw = new BinaryWriter(fs, Encoding.Unicode, true))
             {
                 bw.Write(p.Codice);
 
                 // NOME LENGTH_FISSA
-                string nomeFisso = p.Nome.PadRight(DIM_NOME);
-                bw.Write(System.Text.Encoding.ASCII.GetBytes(nomeFisso));
+                byte[] nomeBytes = new byte[DIM_NOME * 2];
+                byte[] nomeCodificato = Encoding.Unicode.GetBytes(p.Nome);
+
+                if (nomeCodificato.Length > nomeBytes.Length)
+                    throw new ArgumentException("NOME TROPPO LUNGO.");
+
+                Array.Copy(nomeCodificato, nomeBytes, nomeCodificato.Length);
+                bw.Write(nomeBytes);
 
                 bw.Write(p.Prezzo);
                 bw.Write(p.Quantita);
@@ -129,7 +168,7 @@ namespace WFormMagazzino
 
             while (sinistra <= destra)
             {
-                int centro = (sinistra + destra) / 2;
+                int centro = sinistra + (destra - sinistra) / 2;
 
                 if (indici[centro].Codice == codiceDaCercare)
                 {
@@ -146,6 +185,21 @@ namespace WFormMagazzino
             }
 
             return -1; // NOT FOUND
+        }
+
+        public Prodotto CercaProdottoAttivo(int codice)
+        {
+            int posizione = BinarySearch(indici, codice);
+
+            if (posizione == -1)
+                return null;
+
+            Prodotto p = LeggiProdotto(posizione);
+
+            if (!p.IsActive)
+                return null;
+
+            return p;
         }
 
         // ** CLASSI **
@@ -189,7 +243,6 @@ namespace WFormMagazzino
                 get { return _isActive; }
                 set { _isActive = value; }
             }
-
 
             public Prodotto(int c, string n, decimal p, int q, bool i)
             {
@@ -257,20 +310,22 @@ namespace WFormMagazzino
 
             if (nome.Length > DIM_NOME)
             {
-                MessageBox.Show($"IL NOME PUO' CONTENERE MASSIMO {DIM_NOME} CARATTERI.");
+                MessageBox.Show($"IL NOME PUÒ CONTENERE MASSIMO {DIM_NOME} CARATTERI.");
                 return;
             }
 
             decimal prezzo = nudPrezzo.Value;
-            int quantita = (int) nudQty.Value;
+            int quantita = (int)nudQty.Value;
 
             // CREA PRODOTTO
             Prodotto p = new Prodotto(nome, prezzo, quantita);
 
             int posizione;
-            using (FileStream fs = new FileStream(FILE_ARCHIVIO, FileMode.Open))
+
+            using (FileStream fs = new FileStream(FILE_ARCHIVIO, FileMode.Open, FileAccess.ReadWrite))
             {
                 posizione = (int)fs.Length;
+
                 ScriviProdotto(fs, p, posizione);
             }
 
@@ -282,13 +337,7 @@ namespace WFormMagazzino
             indici.Sort((a, b) => a.Codice.CompareTo(b.Codice));
 
             // RISCRIVE IL FILE
-            using (StreamWriter sw = new StreamWriter(FILE_INDICI, false))
-            {
-                foreach (Indice indice in indici)
-                {
-                    sw.WriteLine($"{indice.Codice};{indice.Posizione}");
-                }
-            }
+            SalvaIndici();
 
             // AGGIORNA DGV
             dataGridView1.Rows.Add(
@@ -308,27 +357,38 @@ namespace WFormMagazzino
 
         private void btnCerca_Click(object sender, EventArgs e)
         {
+            if (!int.TryParse(txtCodice.Text, out int codice))
+            {
+                MessageBox.Show("CODICE NON VALIDO.");
+                return;
+            }
+
             try
             {
-                int codice = Convert.ToInt32(txtCodice.Text);
+                int posizione = BinarySearch(indici, codice);
 
-                int posizone = BinarySearch(indici, codice);
-                if (posizone == -1)
+                if (posizione == -1)
                 {
                     MessageBox.Show("CODICE NON PRESENTE.");
                     return;
                 }
 
-                Prodotto p = LeggiProdotto(posizone);
+                Prodotto p = LeggiProdotto(posizione);
+
+                if (!p.IsActive)
+                {
+                    MessageBox.Show("PRODOTTO ELIMINATO.");
+                    return;
+                }
+
                 txtCodice.Text = p.Codice.ToString();
-                txtNome.Text = p.Nome.ToString();
+                txtNome.Text = p.Nome;
                 nudPrezzo.Value = p.Prezzo;
                 nudQty.Value = p.Quantita;
             }
-            catch (Exception) 
+            catch (Exception ex)
             {
-                MessageBox.Show("CODICE NON VALIDO.");
-                return;
+                MessageBox.Show($"ERRORE DURANTE LA LETTURA: {ex.Message}");
             }
         }
 
@@ -344,70 +404,91 @@ namespace WFormMagazzino
 
             if (nome.Length > DIM_NOME)
             {
-                MessageBox.Show($"IL NOME PUO' CONTENERE MASSIMO {DIM_NOME} CARATTERI.");
+                MessageBox.Show($"IL NOME PUÒ CONTENERE MASSIMO {DIM_NOME} CARATTERI.");
                 return;
             }
 
-            decimal prezzo = nudPrezzo.Value;
-            int quantita = (int)nudQty.Value;
+            if (!int.TryParse(txtCodice.Text, out int codice))
+            {
+                MessageBox.Show("CODICE NON VALIDO.");
+                return;
+            }
 
             try
             {
-                int codice = Convert.ToInt32(txtCodice.Text);
-                int posizone = BinarySearch(indici, codice);
-                if (posizone == -1)
+                int posizione = BinarySearch(indici, codice);
+
+                if (posizione == -1)
                 {
                     MessageBox.Show("CODICE NON PRESENTE.");
                     return;
                 }
 
-                Prodotto p = LeggiProdotto(posizone);
-                p.Nome = nome;
-                p.Prezzo = prezzo;
-                p.Quantita = quantita;
+                Prodotto p = LeggiProdotto(posizione);
 
-                using (FileStream fs = new FileStream(FILE_ARCHIVIO, FileMode.Open))
+                if (!p.IsActive)
                 {
-                    ScriviProdotto(fs, p, posizone);
+                    MessageBox.Show("PRODOTTO ELIMINATO.");
+                    return;
                 }
 
-                MessageBox.Show("PRDOTTO AGGIRNATO.");
+                p.Nome = nome;
+                p.Prezzo = nudPrezzo.Value;
+                p.Quantita = (int)nudQty.Value;
+
+                using (FileStream fs = new FileStream(FILE_ARCHIVIO, FileMode.Open, FileAccess.ReadWrite))
+                {
+                    ScriviProdotto(fs, p, posizione);
+                }
+
+                MessageBox.Show("PRODOTTO AGGIORNATO.");
                 AggiornaDGV();
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                MessageBox.Show("CODICE NON VALIDO.");
-                return;
+                MessageBox.Show($"ERRORE DURANTE LA MODIFICA: {ex.Message}");
             }
         }
 
         private void btnElimina_Click(object sender, EventArgs e)
         {
-            try 
+            if (!int.TryParse(txtCodice.Text, out int codice))
             {
-                int codice = Convert.ToInt32(txtCodice.Text);
-                int posizone = BinarySearch(indici, codice);
-                if (posizone == -1)
+                MessageBox.Show("CODICE NON VALIDO.");
+                return;
+            }
+
+            try
+            {
+                int posizione = BinarySearch(indici, codice);
+
+                if (posizione == -1)
                 {
                     MessageBox.Show("CODICE NON PRESENTE.");
                     return;
                 }
 
-                Prodotto p = LeggiProdotto(posizone);
-                p.IsActive = false;
+                Prodotto p = LeggiProdotto(posizione);
 
-                using (FileStream fs = new FileStream(FILE_ARCHIVIO, FileMode.Open))
+                if (!p.IsActive)
                 {
-                    ScriviProdotto(fs, p, posizone);
+                    MessageBox.Show("PRODOTTO GIÀ ELIMINATO.");
+                    return;
                 }
 
-                MessageBox.Show("PRDOTTO ELIMINATO.");
-                AggiornaDGV();
+                p.IsActive = false;
 
-            } catch (Exception)
+                using (FileStream fs = new FileStream(FILE_ARCHIVIO, FileMode.Open, FileAccess.ReadWrite))
+                {
+                    ScriviProdotto(fs, p, posizione);
+                }
+
+                MessageBox.Show("PRODOTTO ELIMINATO.");
+                AggiornaDGV();
+            }
+            catch (Exception ex)
             {
-                MessageBox.Show("CODICE NON VALIDO.");
-                return;
+                MessageBox.Show($"ERRORE DURANTE L'ELIMINAZIONE: {ex.Message}");
             }
         }
     }
